@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import type * as FsPromises from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -20,6 +21,19 @@ import {
 import { installModelSelectionProjection } from '../src/model-selection-projection.ts'
 import { installSessionReadTestServices, testSessionPersistence } from './test-remote.ts'
 
+/** Existing directories whose `mkdir` fails with EPERM, as Windows reports for a drive root. */
+const mkdirDenied = vi.hoisted(() => new Set<string>())
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>()
+  return {
+    ...actual,
+    mkdir: (path: string, options?: Parameters<typeof actual.mkdir>[1]) => mkdirDenied.has(path)
+      ? Promise.reject(Object.assign(new Error(`EPERM: operation not permitted, mkdir '${path}'`), { code: 'EPERM' }))
+      : actual.mkdir(path, options),
+  }
+})
+
 const roots: Context[] = []
 
 /** Session cwd roots created per test, removed after their context settles. */
@@ -28,6 +42,7 @@ const tempDirs: string[] = []
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose()))
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  mkdirDenied.clear()
 })
 
 async function harness(): Promise<{ ctx: Context; agents: ApiSessionAgentController }> {
@@ -358,5 +373,26 @@ describe('ApiSession creation', () => {
     writeFileSync(file, 'not a directory')
     await expect(agents.createSession({ cwd: join(file, 'child'), reusable: () => true }))
       .rejects.toThrow('failed to ensure project directory')
+  })
+
+  it('creates a session in an existing directory whose mkdir is denied', async () => {
+    const { ctx, agents } = await harness()
+    const cwd = mkdtempSync(join(tmpdir(), 'dsh-session-controller-root-'))
+    tempDirs.push(cwd)
+    mkdirDenied.add(cwd)
+    const create = vi.spyOn(ctx.agents, 'create').mockRejectedValue(new Error('factory reached'))
+    await expect(agents.createSession({ cwd, reusable: () => true })).rejects.toThrow('factory reached')
+    expect(create.mock.calls[0]?.[0].meta?.cwd).toBe(cwd)
+  })
+
+  it('surfaces a denied mkdir when the path is a file', async () => {
+    const { agents } = await harness()
+    const parent = mkdtempSync(join(tmpdir(), 'dsh-session-controller-file-'))
+    tempDirs.push(parent)
+    const file = join(parent, 'file')
+    writeFileSync(file, 'not a directory')
+    mkdirDenied.add(file)
+    await expect(agents.createSession({ cwd: file, reusable: () => true }))
+      .rejects.toThrow(`failed to ensure project directory "${file}": Error: EPERM`)
   })
 })

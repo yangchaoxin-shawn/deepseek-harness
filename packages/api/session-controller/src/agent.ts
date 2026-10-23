@@ -1,7 +1,7 @@
 /** Agent activation, composition, and model-selection policy owned by API Session. */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {
@@ -562,7 +562,7 @@ export class ApiSessionAgentController {
 
   private async createAgent(sessionId: SessionId, cwd: string, composition: ApiSessionComposition): Promise<Agent> {
     try {
-      await mkdir(cwd, { recursive: true })
+      await ensureDirectory(cwd)
     } catch (error: unknown) {
       throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
     }
@@ -596,6 +596,29 @@ export class ApiSessionAgentController {
       throw new Error('api-session: Agent activation requires a projected Session observation')
     }
     return observation.projections.values.agentPreset ?? undefined
+  }
+}
+
+/**
+ * Create `path` as a directory unless it already is one.
+ * Windows reports `mkdir` of an existing drive root such as `C:\` as EPERM rather than EEXIST,
+ * so a failed `mkdir` succeeds when the path is an existing directory and otherwise rethrows the `mkdir` error.
+ * @param path - project directory to ensure.
+ */
+async function ensureDirectory(path: string): Promise<void> {
+  try {
+    await mkdir(path, { recursive: true })
+  } catch (error: unknown) {
+    if (!await isDirectory(path)) throw error
+  }
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory()
+  } catch {
+    // A missing or unreadable path is not an existing directory; the caller reports its mkdir failure.
+    return false
   }
 }
 
